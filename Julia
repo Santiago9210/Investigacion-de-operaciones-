@@ -1,0 +1,148 @@
+# --- Datos ---
+petroleos = [1,2,3,4]
+octanaje = Dict(1=>68, 2=>86, 3=>91, 4=>99)
+disponibles = Dict(1=>4000.0, 2=>5050.0, 3=>7100.0, 4=>4300.0)
+costo = Dict(1=>31.02, 2=>33.15, 3=>36.35, 4=>38.75)
+
+combustibles = [1,2,3]
+min_oct = Dict(1=>95.0, 2=>90.0, 3=>85.0)
+precio_venta = Dict(1=>45.15, 2=>42.95, 3=>40.99)
+venta_esperada_max = Dict(1=>10000.0)
+venta_esperada_min = Dict(3=>15000.0)
+precio_venta_crudo = Dict(i => (octanaje[i] > 90 ? 38.95 : 36.85) for i in petroleos)
+
+
+n_x = length(petroleos) * length(combustibles)
+n_s = length(petroleos)
+n_vars = n_x + n_s
+
+idx_x(i,j) = (findfirst(==(i),petroleos)-1)*length(combustibles) + (findfirst(==(j),combustibles))
+idx_s(i) = n_x + findfirst(==(i),petroleos)
+
+
+profit = zeros(n_vars)
+for i in petroleos, j in combustibles
+    profit[idx_x(i,j)] = precio_venta[j] - costo[i]
+end
+for i in petroleos
+    profit[idx_s(i)] = precio_venta_crudo[i] - costo[i]
+end
+
+
+A = Float64[]  # filas se concatenarán
+b = Float64[]
+
+
+for i in petroleos
+    row = zeros(n_vars)
+    for j in combustibles
+        row[idx_x(i,j)] = 1.0
+    end
+    row[idx_s(i)] = 1.0
+    append!(A, row)
+    push!(b, disponibles[i])
+end
+
+
+row = zeros(n_vars)
+for i in petroleos
+    row[idx_x(i,1)] = 1.0
+end
+append!(A,row); push!(b, venta_esperada_max[1])
+
+
+for j in combustibles
+    row = zeros(n_vars)
+    for i in petroleos
+        row[idx_x(i,j)] = -(octanaje[i] - min_oct[j])
+    end
+    append!(A,row); push!(b, 0.0)
+end
+
+
+row = zeros(n_vars)
+for i in petroleos
+    row[idx_x(i,3)] = -1.0
+end
+append!(A,row); push!(b, -venta_esperada_min[3])
+
+
+m = Int(length(b))
+A_mat = reshape(A, n_vars, m)'  # m x n_vars
+
+
+using LinearAlgebra
+A_eq = hcat(A_mat, Matrix(I, m, m))   # m x (n_vars+m)
+total_vars = n_vars + m
+
+
+T = zeros(m+1, total_vars+1)
+T[1:m, 1:total_vars] = A_eq
+T[1:m, end] = b
+profit_full = vcat(profit, zeros(m))
+T[end, 1:total_vars] = -profit_full'   # fila de objetivo (maximizar)
+
+
+basis = [n_vars + i for i in 1:m]
+
+max_iters = 2000
+for it in 1:max_iters
+    obj_row = T[end, 1:total_vars]
+ 
+    if all(obj_row .>= -1e-9)
+        break
+    end
+  
+    entering = findfirst(<( -1e-9), obj_row)
+    if entering === nothing
+        break
+    end
+    col = T[1:m, entering]
+    rhs = T[1:m, end]
+    positive = col .> 1e-12
+    if !any(positive)
+        error("Problema no acotado (fallback simplex).")
+    end
+    ratios = fill(Inf, m)
+    for r in 1:m
+        if positive[r]
+            ratios[r] = rhs[r] / col[r]
+        end
+    end
+    leaving_row = argmin(ratios)
+    # pivot
+    pivot = T[leaving_row, entering]
+    T[leaving_row, :] ./= pivot
+    for r in 1:(m+1)
+        if r != leaving_row
+            T[r, :] .-= T[r, entering] * T[leaving_row, :]
+        end
+    end
+    basis[leaving_row] = entering
+end
+
+
+solution = zeros(total_vars)
+for r in 1:m
+    solution[basis[r]] = T[r, end]
+end
+xopt = solution[1:n_vars]
+obj = dot(profit, xopt)
+
+println("----- RESULTADO -----")
+println("Lucro máximo aproximado: USD $(round(obj, digits=2))\n")
+println("Por crudo (barriles/día):")
+for i in petroleos
+    usado = sum(xopt[idx_x(i,j)] for j in combustibles)
+    vendido = xopt[idx_s(i)]
+    println(" Crudo $(i) (oct $(octanaje[i])): Usado = $(round(usado, digits=2))  |  Vendido crudo = $(round(vendido, digits=2))")
+end
+
+println("\nCrudos vendidos como crudo (venta > 0):")
+vendidos = [i for i in petroleos if xopt[idx_s(i)] > 1e-6]
+if !isempty(vendidos)
+    println(" ", join(vendidos, ", "))
+else
+    println(" Ninguno")
+end
+
