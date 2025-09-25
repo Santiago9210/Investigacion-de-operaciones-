@@ -1,0 +1,56 @@
+!pip install pulp
+
+import pulp
+
+# --- Datos ---
+petroleos = [1,2,3,4]
+octanaje = {1:68, 2:86, 3:91, 4:99}
+disponibles = {1:4000, 2:5050, 3:7100, 4:4300}
+costo = {1:31.02, 2:33.15, 3:36.35, 4:38.75}
+
+combustibles = [1,2,3]
+min_oct = {1:95, 2:90, 3:85}
+precio_venta = {1:45.15, 2:42.95, 3:40.99}
+venta_esperada_max = {1:10000}
+venta_esperada_min = {3:15000}
+precio_venta_crudo = {i:(38.95 if octanaje[i] > 90 else 36.85) for i in petroleos}
+
+# --- Problema ---
+prob = pulp.LpProblem("Refineria", pulp.LpMaximize)
+
+# Variables: x[i,j] mezcla, s[i] venta como crudo
+x = pulp.LpVariable.dicts("x", [(i,j) for i in petroleos for j in combustibles], lowBound=0)
+s = pulp.LpVariable.dicts("s", petroleos, lowBound=0)
+
+# Objetivo: maximizar ganancia
+prob += pulp.lpSum([(precio_venta[j]-costo[i])*x[(i,j)] for i in petroleos for j in combustibles]) \
+      + pulp.lpSum([(precio_venta_crudo[i]-costo[i])*s[i] for i in petroleos])
+
+# Restricciones: disponibilidad
+for i in petroleos:
+    prob += pulp.lpSum([x[(i,j)] for j in combustibles]) + s[i] <= disponibles[i]
+
+# Ventas esperadas
+prob += pulp.lpSum([x[(i,1)] for i in petroleos]) <= venta_esperada_max[1]
+prob += pulp.lpSum([x[(i,3)] for i in petroleos]) >= venta_esperada_min[3]
+
+# Octanaje mínimo por combustible
+for j in combustibles:
+    prob += pulp.lpSum([(octanaje[i]-min_oct[j])*x[(i,j)] for i in petroleos]) >= 0
+
+# --- Resolver ---
+prob.solve(pulp.PULP_CBC_CMD(msg=0))
+
+# --- Resultados ---
+print("----- RESULTADOS -----")
+print(f"Lucro máximo: USD {pulp.value(prob.objective):.2f}\n")
+
+print("Por crudo (barriles/día):")
+for i in petroleos:
+    usado = sum(x[(i,j)].varValue for j in combustibles)
+    vendido = s[i].varValue
+    print(f" Crudo {i} (oct {octanaje[i]}): Usado = {usado:.2f}  |  Vendido crudo = {vendido:.2f}")
+
+vendidos = [i for i in petroleos if s[i].varValue > 1e-6]
+print("\nCrudos vendidos como crudo (venta > 0):")
+print(vendidos if vendidos else "Ninguno")
