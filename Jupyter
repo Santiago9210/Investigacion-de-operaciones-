@@ -1,0 +1,134 @@
+import numpy as np
+
+# Datos
+petroleos = [1,2,3,4]
+octanaje = {1:68, 2:86, 3:91, 4:99}
+disponibles = {1:4000.0, 2:5050.0, 3:7100.0, 4:4300.0}
+costo = {1:31.02, 2:33.15, 3:36.35, 4:38.75}
+
+combustibles = [1,2,3]
+min_oct = {1:95.0, 2:90.0, 3:85.0}
+precio_venta = {1:45.15, 2:42.95, 3:40.99}
+venta_esperada_max = {1:10000.0}
+venta_esperada_min = {3:15000.0}
+precio_venta_crudo = {i: (38.95 if octanaje[i] > 90 else 36.85) for i in petroleos}
+
+# Indices
+n_x = len(petroleos) * len(combustibles)
+n_s = len(petroleos)
+n_vars = n_x + n_s
+
+def idx_x(i,j):
+    i_idx = petroleos.index(i)
+    j_idx = combustibles.index(j)
+    return i_idx * len(combustibles) + j_idx
+
+def idx_s(i):
+    return n_x + petroleos.index(i)
+
+# Objetivo 
+c = np.zeros(n_vars)
+for i in petroleos:
+    for j in combustibles:
+        c[idx_x(i,j)] = -(precio_venta[j] - costo[i])
+for i in petroleos:
+    c[idx_s(i)] = -(precio_venta_crudo[i] - costo[i])
+
+# Restricciones A_ub x <= b_ub
+A_ub = []
+b_ub = []
+
+# Disponibilidad
+for i in petroleos:
+    row = np.zeros(n_vars)
+    for j in combustibles:
+        row[idx_x(i,j)] = 1.0
+    row[idx_s(i)] = 1.0
+    A_ub.append(row); b_ub.append(disponibles[i])
+
+# y1 <= 10000
+row = np.zeros(n_vars)
+for i in petroleos:
+    row[idx_x(i,1)] = 1.0
+A_ub.append(row); b_ub.append(venta_esperada_max[1])
+
+# Octanaje
+for j in combustibles:
+    row = np.zeros(n_vars)
+    for i in petroleos:
+        row[idx_x(i,j)] = -(octanaje[i] - min_oct[j])
+    A_ub.append(row); b_ub.append(0.0)
+
+# y3 >= 15000 -> -sum_i x_{i,3} <= -15000
+row = np.zeros(n_vars)
+for i in petroleos:
+    row[idx_x(i,3)] = -1.0
+A_ub.append(row); b_ub.append(-venta_esperada_min[3])
+
+A_ub = np.array(A_ub); b_ub = np.array(b_ub)
+bounds = [(0, None) for _ in range(n_vars)]
+
+# Intentar scipy.linprog
+sol = None
+try:
+    from scipy.optimize import linprog
+    res = linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=bounds, method='highs')
+    if res.success:
+        xopt = res.x
+        obj = -res.fun
+        sol = (xopt, obj)
+except Exception:
+    pass
+
+if sol is None:
+    m = A_ub.shape[0]
+    A_eq = np.hstack([A_ub, np.eye(m)])
+    total_vars = n_vars + m
+    profit_coeff = -c
+    profit_full = np.concatenate([profit_coeff, np.zeros(m)])
+    T = np.zeros((m+1, total_vars+1))
+    T[:m, :total_vars] = A_eq
+    T[:m, -1] = b_ub
+    T[-1, :total_vars] = -profit_full
+    basis = [n_vars + i for i in range(m)]
+    max_iters = 1000
+    for it in range(max_iters):
+        obj_row = T[-1, :-1]
+        if np.all(obj_row >= -1e-9):
+            break
+        entering = np.where(obj_row < -1e-9)[0][0]
+        col = T[:m, entering]; rhs = T[:m, -1]
+        positive = col > 1e-12
+        if not np.any(positive):
+            raise RuntimeError("Problema no acotado.")
+        ratios = np.full(m, np.inf)
+        ratios[positive] = rhs[positive] / col[positive]
+        leaving_row = np.argmin(ratios)
+        pivot = T[leaving_row, entering]
+        T[leaving_row, :] /= pivot
+        for r in range(m+1):
+            if r != leaving_row:
+                T[r, :] -= T[r, entering] * T[leaving_row, :]
+        basis[leaving_row] = entering
+    solution = np.zeros(total_vars)
+    for i_row in range(m):
+        solution[basis[i_row]] = T[i_row, -1]
+    xopt = solution[:n_vars]
+    obj = float(np.dot(profit_coeff, xopt))
+
+
+print("----- RESULTADO -----")
+print(f"Lucro máximo aproximado: USD {obj:.2f}\n")
+
+print("Por crudo (barriles/día):")
+for i in petroleos:
+    usado = sum(xopt[idx_x(i,j)] for j in combustibles)
+    vendido = xopt[idx_s(i)]
+    print(f" Crudo {i} (oct {octanaje[i]}): Usado = {usado:.2f}  |  Vendido crudo = {vendido:.2f}")
+
+print("\nCrudos vendidos como crudo (venta > 0):")
+vendidos = [i for i in petroleos if xopt[idx_s(i)] > 1e-6]
+if vendidos:
+    print(" ", ", ".join(str(i) for i in vendidos))
+else:
+    print("  Ninguno")
